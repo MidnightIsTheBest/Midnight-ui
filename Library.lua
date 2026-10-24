@@ -146,27 +146,32 @@ local function keyName(key)
 	n = n:gsub("(%l)(%u)", "%1 %2"):gsub("(%a)(%d)", "%1 %2")
 	return n:lower()
 end
-local function inside(obj, pos)
+local function inside(obj, pos, margin)
 	if not obj or not obj.Parent then return false end
+	margin = margin or 4
 	local p, s = obj.AbsolutePosition, obj.AbsoluteSize
-	return pos.X >= p.X and pos.Y >= p.Y and pos.X <= p.X + s.X and pos.Y <= p.Y + s.Y
+	return pos.X >= p.X - margin and pos.Y >= p.Y - margin
+		and pos.X <= p.X + s.X + margin and pos.Y <= p.Y + s.Y + margin
 end
 local function connect(signal, fn)
 	local c = signal:Connect(fn)
 	table.insert(Library._connections, c)
 	return c
 end
--- Mouse position in the same space as AbsolutePosition.
--- GetMouseLocation() is measured from the very top of the screen, but a ScreenGui can still
--- be laid out below Roblox's top bar (depends on where it is parented and the ScreenInsets mode).
--- Measure the real offset (viewport height minus the ScreenGui's height) and remove it.
+-- Mouse position in the same coordinate space as AbsolutePosition.
+-- GetMouseLocation() is measured from the very top of the screen, while AbsolutePosition can be
+-- measured from below Roblox's top bar, depending on the client and how the ScreenGui is laid out.
+-- Instead of guessing, an invisible probe sits at the ScreenGui's top-left corner:
+--   where the probe really is on screen  = viewport height - ScreenGui height (0 when drawn over the top bar)
+--   where AbsolutePosition says it is    = probe.AbsolutePosition
+-- The difference is exactly the offset to remove from the mouse position.
 local function pointer()
 	local m = UserInputService:GetMouseLocation()
-	local gui = Library._gui
-	local cam = workspace.CurrentCamera
-	if gui and cam then
-		local offsetY = cam.ViewportSize.Y - gui.AbsoluteSize.Y
-		if offsetY > 0 then m -= Vector2.new(0, offsetY) end
+	local gui, probe, cam = Library._gui, Library._probe, workspace.CurrentCamera
+	if gui and probe and cam then
+		local screenTop = cam.ViewportSize.Y - gui.AbsoluteSize.Y
+		local p = probe.AbsolutePosition
+		m -= Vector2.new(-p.X, screenTop - p.Y)
 	end
 	return m
 end
@@ -880,6 +885,7 @@ function Library:CreateWindow(cfg)
 	gui.Parent = getGuiParent()
 	win.Gui = gui
 	Library._gui = gui
+	Library._probe = create("Frame", { Name = "Probe", Size = UDim2.fromOffset(0, 0), BackgroundTransparency = 1, Parent = gui })
 
 	-- frosted backdrop: blurs the 3D world behind the glass while the menu is open
 	if win.BlurSize > 0 then
@@ -1171,6 +1177,17 @@ function Window:_buildKeybindList()
 end
 
 ------------------------------------------------------------------------
+-- prints the numbers the cursor correction is based on (paste them back if clicks are still offset)
+function Library:DebugPointer()
+	local cam = workspace.CurrentCamera
+	print(string.format(
+		"[pawclient] mouse=%s corrected=%s viewport=%s guiSize=%s probe=%s ignoreInset=%s",
+		tostring(UserInputService:GetMouseLocation()), tostring(pointer()),
+		tostring(cam and cam.ViewportSize), tostring(self._gui and self._gui.AbsoluteSize),
+		tostring(self._probe and self._probe.AbsolutePosition), tostring(self._gui and self._gui.IgnoreGuiInset)
+	))
+end
+
 function Library:Destroy()
 	for _, c in ipairs(self._connections) do c:Disconnect() end
 	table.clear(self._connections)
