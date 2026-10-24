@@ -520,6 +520,75 @@ function Container:Button(cfg)
 	end)
 end
 
+-- TextBox ------------------------------------------------------------
+-- cfg: Name, Default, Placeholder, Flag, Callback(text, enterPressed),
+--      Numeric (only allow numbers), ClearOnFocus, MaxLength, Live (fire Callback on every keystroke)
+function Container:TextBox(cfg)
+	cfg = cfg or {}
+	local tb = { Value = cfg.Default or "", Flag = cfg.Flag, Callback = cfg.Callback or function() end }
+
+	local row = self:_row(60)
+	create("TextLabel", {
+		Position = UDim2.fromOffset(self.Inset, 0), Size = UDim2.new(1, -self.Inset * 2, 0, 20),
+		BackgroundTransparency = 1, Text = cfg.Name or "textbox", TextColor3 = Theme.TextDim, TextSize = 18,
+		FontFace = FONT, TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
+	})
+	local box = create("TextBox", {
+		Position = UDim2.fromOffset(self.Inset, 28), Size = UDim2.new(1, -self.Inset * 2, 0, 32),
+		Text = tb.Value, PlaceholderText = cfg.Placeholder or "type here...",
+		TextColor3 = Theme.Text, PlaceholderColor3 = Theme.TextDim, TextSize = 18, FontFace = FONT,
+		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+		ClearTextOnFocus = cfg.ClearOnFocus or false, ClipsDescendants = true, Parent = row,
+	}, { pad(0, 0, 12, 12) })
+	local boxStroke = boxStyle(box, 8)
+
+	local function clean(text)
+		if cfg.Numeric then
+			text = text:gsub("[^%d%.%-]", "")
+		end
+		if cfg.MaxLength and #text > cfg.MaxLength then
+			text = text:sub(1, cfg.MaxLength)
+		end
+		return text
+	end
+
+	function tb:Set(text, silent)
+		text = clean(tostring(text or ""))
+		self.Value = text
+		box.Text = text
+		if self.Flag then Library.Flags[self.Flag] = cfg.Numeric and tonumber(text) or text end
+		if not silent then task.spawn(self.Callback, self.Value, false) end
+	end
+	function tb:Get() return self.Value end
+
+	-- pink outline while typing
+	box.Focused:Connect(function()
+		boxStroke.Color = Library.Accent
+		tween(box, 0.15, { BackgroundTransparency = Theme.BoxT - 0.1 })
+	end)
+	box.FocusLost:Connect(function(enterPressed)
+		boxStroke.Color = WHITE
+		tween(box, 0.15, { BackgroundTransparency = Theme.BoxT })
+		local text = clean(box.Text)
+		box.Text = text
+		tb.Value = text
+		if tb.Flag then Library.Flags[tb.Flag] = cfg.Numeric and tonumber(text) or text end
+		task.spawn(tb.Callback, text, enterPressed)
+	end)
+	box:GetPropertyChangedSignal("Text"):Connect(function()
+		local text = clean(box.Text)
+		if text ~= box.Text then box.Text = text return end
+		if cfg.Live then
+			tb.Value = text
+			if tb.Flag then Library.Flags[tb.Flag] = cfg.Numeric and tonumber(text) or text end
+			task.spawn(tb.Callback, text, false)
+		end
+	end)
+
+	if tb.Flag then Library.Flags[tb.Flag] = cfg.Numeric and tonumber(tb.Value) or tb.Value end
+	return tb
+end
+
 -- Keybind ------------------------------------------------------------
 function Container:Keybind(cfg)
 	cfg = cfg or {}
