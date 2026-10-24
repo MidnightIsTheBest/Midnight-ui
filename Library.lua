@@ -159,21 +159,13 @@ local function connect(signal, fn)
 	return c
 end
 -- Mouse position in the same coordinate space as AbsolutePosition.
--- GetMouseLocation() is measured from the very top of the screen, while AbsolutePosition can be
--- measured from below Roblox's top bar, depending on the client and how the ScreenGui is laid out.
--- Instead of guessing, an invisible probe sits at the ScreenGui's top-left corner:
---   where the probe really is on screen  = viewport height - ScreenGui height (0 when drawn over the top bar)
---   where AbsolutePosition says it is    = probe.AbsolutePosition
--- The difference is exactly the offset to remove from the mouse position.
+-- The ScreenGui keeps the default top-bar inset (IgnoreGuiInset = false), and Mouse.X / Mouse.Y
+-- are reported in that same inset space, so the two always line up.
+-- Library.PointerOffset is a manual nudge in case a client still reports a fixed offset.
+Library.PointerOffset = Vector2.zero
+local Mouse = LocalPlayer:GetMouse()
 local function pointer()
-	local m = UserInputService:GetMouseLocation()
-	local gui, probe, cam = Library._gui, Library._probe, workspace.CurrentCamera
-	if gui and probe and cam then
-		local screenTop = cam.ViewportSize.Y - gui.AbsoluteSize.Y
-		local p = probe.AbsolutePosition
-		m -= Vector2.new(-p.X, screenTop - p.Y)
-	end
-	return m
+	return Vector2.new(Mouse.X, Mouse.Y) + Library.PointerOffset
 end
 local function isPress(input)
 	return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
@@ -339,6 +331,9 @@ function Library:_togglePopup(window, frame, anchor, placement, onClose)
 	else
 		frame.Position = UDim2.fromOffset(rel.X, rel.Y + size.Y + 6)
 	end
+	-- stack order: a popup opened from inside another popup must draw above it,
+	-- otherwise a dropdown list ends up hidden behind its settings panel
+	frame.ZIndex = 5 + (#self._popups + 1) * 2
 	frame.Visible = true
 	table.insert(self._popups, { Frame = frame, Anchor = anchor, OnClose = onClose })
 end
@@ -878,14 +873,12 @@ function Library:CreateWindow(cfg)
 	}, Window)
 
 	local gui = create("ScreenGui", {
-		Name = "pawclient", ResetOnSpawn = false, IgnoreGuiInset = true,
+		Name = "pawclient", ResetOnSpawn = false, IgnoreGuiInset = false,
 		ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 999,
 	})
-	pcall(function() gui.ScreenInsets = Enum.ScreenInsets.None end)
 	gui.Parent = getGuiParent()
 	win.Gui = gui
 	Library._gui = gui
-	Library._probe = create("Frame", { Name = "Probe", Size = UDim2.fromOffset(0, 0), BackgroundTransparency = 1, Parent = gui })
 
 	-- frosted backdrop: blurs the 3D world behind the glass while the menu is open
 	if win.BlurSize > 0 then
@@ -1181,10 +1174,10 @@ end
 function Library:DebugPointer()
 	local cam = workspace.CurrentCamera
 	print(string.format(
-		"[pawclient] mouse=%s corrected=%s viewport=%s guiSize=%s probe=%s ignoreInset=%s",
-		tostring(UserInputService:GetMouseLocation()), tostring(pointer()),
-		tostring(cam and cam.ViewportSize), tostring(self._gui and self._gui.AbsoluteSize),
-		tostring(self._probe and self._probe.AbsolutePosition), tostring(self._gui and self._gui.IgnoreGuiInset)
+		"[pawclient] pointer=%s mouseLocation=%s viewport=%s guiPos=%s guiSize=%s",
+		tostring(pointer()), tostring(UserInputService:GetMouseLocation()),
+		tostring(cam and cam.ViewportSize), tostring(self._gui and self._gui.AbsolutePosition),
+		tostring(self._gui and self._gui.AbsoluteSize)
 	))
 end
 
