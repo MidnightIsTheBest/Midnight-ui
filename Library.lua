@@ -156,6 +156,20 @@ local function connect(signal, fn)
 	table.insert(Library._connections, c)
 	return c
 end
+-- Mouse position in the same space as AbsolutePosition.
+-- GetMouseLocation() is measured from the very top of the screen, but a ScreenGui can still
+-- be laid out below Roblox's top bar (depends on where it is parented and the ScreenInsets mode).
+-- Measure the real offset (viewport height minus the ScreenGui's height) and remove it.
+local function pointer()
+	local m = UserInputService:GetMouseLocation()
+	local gui = Library._gui
+	local cam = workspace.CurrentCamera
+	if gui and cam then
+		local offsetY = cam.ViewportSize.Y - gui.AbsoluteSize.Y
+		if offsetY > 0 then m -= Vector2.new(0, offsetY) end
+	end
+	return m
+end
 local function isPress(input)
 	return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
 end
@@ -326,7 +340,7 @@ end
 
 connect(UserInputService.InputBegan, function(input)
 	if not isPress(input) or #Library._popups == 0 then return end
-	local pos = UserInputService:GetMouseLocation()
+	local pos = pointer()
 	for i = #Library._popups, 1, -1 do
 		local p = Library._popups[i]
 		if inside(p.Frame, pos) or inside(p.Anchor, pos) then
@@ -599,7 +613,7 @@ function Container:Slider(cfg)
 
 	local dragging = false
 	local function update()
-		local x = UserInputService:GetMouseLocation().X
+		local x = pointer().X
 		local a = math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
 		slider:Set(min + (max - min) * a)
 	end
@@ -798,7 +812,7 @@ function Container:ColorPicker(cfg)
 
 	local dragging
 	local function update()
-		local m = UserInputService:GetMouseLocation()
+		local m = pointer()
 		if dragging == "sv" then
 			s = math.clamp((m.X - sv.AbsolutePosition.X) / sv.AbsoluteSize.X, 0, 1)
 			v = 1 - math.clamp((m.Y - sv.AbsolutePosition.Y) / sv.AbsoluteSize.Y, 0, 1)
@@ -862,8 +876,10 @@ function Library:CreateWindow(cfg)
 		Name = "pawclient", ResetOnSpawn = false, IgnoreGuiInset = true,
 		ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 999,
 	})
+	pcall(function() gui.ScreenInsets = Enum.ScreenInsets.None end)
 	gui.Parent = getGuiParent()
 	win.Gui = gui
+	Library._gui = gui
 
 	-- frosted backdrop: blurs the 3D world behind the glass while the menu is open
 	if win.BlurSize > 0 then
