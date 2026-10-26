@@ -19,6 +19,7 @@ local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Lighting = game:GetService("Lighting")
+local HttpService = game:GetService("HttpService") -- only used for JSONEncode/JSONDecode (works on the client)
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -26,7 +27,10 @@ local LUCIDE_URL = "https://github.com/latte-soft/lucide-roblox/releases/latest/
 
 local Library = {
 	Flags = {},
+	Options = {},   -- flag -> element, used by the config system
 	Accent = Color3.fromRGB(249, 205, 234),
+	_strokes = setmetatable({}, { __mode = "k" }),   -- every glass outline, for the outline colour setting
+	_bgFrames = setmetatable({}, { __mode = "k" }),  -- window + widgets, for the bg transparency setting
 	Lucide = nil,
 	_accentHooks = {},
 	_connections = {},
@@ -50,6 +54,7 @@ local Theme = {
 	TextDim   = Color3.fromRGB(158, 148, 156),
 	TextHover = Color3.fromRGB(206, 197, 203),
 	Check     = Color3.fromRGB(42, 30, 40),
+	Outline   = WHITE,
 }
 Library.Theme = Theme
 
@@ -94,8 +99,9 @@ end
 
 -- glass edge: white stroke that is bright at the top and fades towards the bottom
 local function glassStroke(top, bottom)
-	local s = create("UIStroke", { Color = WHITE, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border })
+	local s = create("UIStroke", { Color = Theme.Outline, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border })
 	create("UIGradient", { Rotation = 90, Transparency = NumberSequence.new(top or 0.7, bottom or 0.92), Parent = s })
+	Library._strokes[s] = true
 	return s
 end
 -- vertical light falloff on a glass surface
@@ -197,6 +203,7 @@ local FALLBACK = {
 	["paw-print"] = "🐾", check = "✓", ellipsis = "···", ["more-horizontal"] = "···",
 	crosshair = "⌖", eye = "◉", sparkles = "✦", settings = "⚙", keyboard = "⌨",
 	files = "❐", ["credit-card"] = "▭", ["chevron-down"] = "⌄", x = "✕",
+	["sliders-horizontal"] = "☰",
 }
 local ALIASES = {
 	ellipsis = { "ellipsis", "more-horizontal" },
@@ -478,6 +485,8 @@ function Container:Toggle(cfg)
 	hit.MouseButton1Click:Connect(function() toggle:Set(not toggle.Value) end)
 
 	table.insert(Library._bindToggles, toggle)
+	toggle.Type = "Toggle"
+	if toggle.Flag then Library.Options[toggle.Flag] = toggle end
 	toggle:Set(cfg.Default or false, true)
 	render(true)
 	if cfg.Default and cfg.CallOnLoad ~= false then task.spawn(toggle.Callback, true) end
@@ -567,7 +576,7 @@ function Container:TextBox(cfg)
 		tween(box, 0.15, { BackgroundTransparency = Theme.BoxT - 0.1 })
 	end)
 	box.FocusLost:Connect(function(enterPressed)
-		boxStroke.Color = WHITE
+		boxStroke.Color = Theme.Outline
 		tween(box, 0.15, { BackgroundTransparency = Theme.BoxT })
 		local text = clean(box.Text)
 		box.Text = text
@@ -586,6 +595,8 @@ function Container:TextBox(cfg)
 	end)
 
 	if tb.Flag then Library.Flags[tb.Flag] = cfg.Numeric and tonumber(tb.Value) or tb.Value end
+	tb.Type = "TextBox"
+	if tb.Flag then Library.Options[tb.Flag] = tb end
 	return tb
 end
 
@@ -627,7 +638,11 @@ function Container:Keybind(cfg)
 			kb._listening = false
 			box.TextColor3 = Theme.TextDim
 			if input.KeyCode == Enum.KeyCode.Backspace or input.KeyCode == Enum.KeyCode.Escape then
-				kb:Set(nil)
+				if cfg.AllowNone == false then
+					box.Text = keyName(kb.Value) -- cancel: this bind can't be cleared
+				else
+					kb:Set(nil)
+				end
 			else
 				kb:Set(input.KeyCode)
 			end
@@ -640,6 +655,8 @@ function Container:Keybind(cfg)
 	end)
 
 	if kb.Flag then Library.Flags[kb.Flag] = kb.Value end
+	kb.Type = "Keybind"
+	if kb.Flag then Library.Options[kb.Flag] = kb end
 	return kb
 end
 
@@ -697,6 +714,8 @@ function Container:Slider(cfg)
 	end)
 
 	slider:Set(slider.Value, true)
+	slider.Type = "Slider"
+	if slider.Flag then Library.Options[slider.Flag] = slider end
 	return slider
 end
 
@@ -796,6 +815,8 @@ function Container:Dropdown(cfg)
 
 	build()
 	if dd.Flag then Library.Flags[dd.Flag] = dd.Value end
+	dd.Type = "Dropdown"
+	if dd.Flag then Library.Options[dd.Flag] = dd end
 	return dd
 end
 
@@ -908,6 +929,8 @@ function Container:ColorPicker(cfg)
 	end)
 
 	render(true)
+	cp.Type = "ColorPicker"
+	if cp.Flag then Library.Options[cp.Flag] = cp end
 	return cp
 end
 
@@ -922,6 +945,7 @@ local SubTab = {}
 SubTab.__index = SubTab
 
 local TITLE_WIDTH = 190
+local buildSettingsTab -- defined further down, called at the end of CreateWindow
 
 local function getGuiParent()
 	local ok, hui = pcall(function() return gethui and gethui() end)
@@ -961,6 +985,7 @@ function Library:CreateWindow(cfg)
 	}, { corner(16), glassStroke(0.55, 0.88) })
 	glassFill(main)
 	sheen(main, 28)
+	Library._bgFrames[main] = true
 	win.Main = main
 	win.Scale = create("UIScale", { Scale = cfg.Scale or 0.8, Parent = main })
 
@@ -1002,6 +1027,7 @@ function Library:CreateWindow(cfg)
 
 	win:_buildWatermark()
 	win:_buildKeybindList()
+	buildSettingsTab(win) -- built in; only removable by editing this module
 	win:SetVisible(true)
 	return win
 end
@@ -1053,7 +1079,7 @@ function Window:Tab(cfg)
 	btn.MouseButton1Click:Connect(function() tab:Select() end)
 
 	table.insert(win.Tabs, tab)
-	if not win.Selected then tab:Select() end
+	if not win.Selected and not cfg._builtin then tab:Select() end
 	return tab
 end
 
@@ -1157,6 +1183,7 @@ local function widgetFrame(props)
 	f.BackgroundColor3 = Theme.Window
 	f.BackgroundTransparency = Theme.WindowT
 	glassFill(f)
+	Library._bgFrames[f] = true
 	return f
 end
 
@@ -1236,6 +1263,298 @@ function Window:_buildKeybindList()
 		Frame = holder,
 		SetVisible = function(_, v) holder.Visible = v Library._keybindListRefresh() end,
 	}
+end
+
+------------------------------------------------------------------------
+-- theme setters
+------------------------------------------------------------------------
+function Library:SetOutline(color)
+	Theme.Outline = color
+	for s in pairs(self._strokes) do
+		if s.Parent then s.Color = color end
+	end
+end
+
+function Library:SetBackgroundTransparency(t)
+	Theme.WindowT = math.clamp(t, 0, 1)
+	for f in pairs(self._bgFrames) do
+		if f.Parent then f.BackgroundTransparency = Theme.WindowT end
+	end
+end
+
+------------------------------------------------------------------------
+-- notifications (small glass toasts, bottom right)
+------------------------------------------------------------------------
+function Library:Notify(text, duration)
+	local gui = self._gui
+	if not gui then print("[pawclient] " .. tostring(text)) return end
+
+	if not self._toasts or not self._toasts.Parent then
+		self._toasts = create("Frame", {
+			Name = "Toasts", AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -16, 1, -16),
+			Size = UDim2.fromOffset(320, 0), BackgroundTransparency = 1, Parent = gui,
+		}, { list(8, nil, Enum.HorizontalAlignment.Right, Enum.VerticalAlignment.Bottom) })
+		create("UIScale", { Scale = 0.8, Parent = self._toasts })
+	end
+
+	local toast = create("Frame", {
+		Size = UDim2.fromOffset(0, 40), AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundColor3 = Theme.Popup, BackgroundTransparency = Theme.PopupT, Parent = self._toasts,
+	}, { corner(12), pad(0, 0, 14, 16), list(10, Enum.FillDirection.Horizontal, nil, Enum.VerticalAlignment.Center) })
+	local st = glassStroke(0.55, 0.88)
+	st.Parent = toast
+	local bar = create("Frame", { Size = UDim2.fromOffset(3, 18), BackgroundColor3 = self.Accent, BorderSizePixel = 0, Parent = toast }, { corner(2) })
+	local label = create("TextLabel", {
+		Size = UDim2.fromOffset(0, 40), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1,
+		Text = tostring(text), TextColor3 = Theme.Text, TextSize = 18, FontFace = FONT, LayoutOrder = 1, Parent = toast,
+	})
+
+	task.delay(duration or 3, function()
+		tween(toast, 0.3, { BackgroundTransparency = 1 })
+		tween(bar, 0.3, { BackgroundTransparency = 1 })
+		tween(label, 0.3, { TextTransparency = 1 })
+		tween(st, 0.3, { Transparency = 1 })
+		task.wait(0.35)
+		toast:Destroy()
+	end)
+end
+
+------------------------------------------------------------------------
+-- configs
+-- Saved as JSON files in "pawclient/configs" when the client environment has file
+-- functions (writefile/readfile/listfiles). Otherwise they are kept in memory for
+-- this session only. Flags starting with "__" are never saved.
+------------------------------------------------------------------------
+local CONFIG_ROOT = "pawclient"
+local CONFIG_DIR = CONFIG_ROOT .. "/configs"
+local memoryConfigs = {}
+
+local function hasFiles()
+	return type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
+end
+
+local function ensureConfigDir()
+	if not hasFiles() then return end
+	pcall(function()
+		if type(isfolder) == "function" and type(makefolder) == "function" then
+			if not isfolder(CONFIG_ROOT) then makefolder(CONFIG_ROOT) end
+			if not isfolder(CONFIG_DIR) then makefolder(CONFIG_DIR) end
+		end
+	end)
+end
+
+local function cleanName(name)
+	name = tostring(name or ""):gsub("[^%w%-_ ]", "")
+	return (name:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function encodeValue(v)
+	if v == nil then return { __t = "None" } end
+	local t = typeof(v)
+	if t == "Color3" then return { __t = "Color3", v = toHex(v) } end
+	if t == "EnumItem" then return { __t = "Enum", e = tostring(v.EnumType), v = v.Name } end
+	if t == "table" then
+		local copy = {}
+		for i, x in ipairs(v) do copy[i] = x end
+		return copy
+	end
+	return v
+end
+
+local function decodeValue(v)
+	if type(v) ~= "table" then return v end
+	if v.__t == "None" then return nil end
+	if v.__t == "Color3" then return fromHex(v.v) end
+	if v.__t == "Enum" then
+		local ok, item = pcall(function() return Enum[v.e][v.v] end)
+		return ok and item or nil
+	end
+	return v
+end
+
+Library.HasFileAccess = hasFiles
+
+function Library:ListConfigs()
+	local names = {}
+	if hasFiles() and type(listfiles) == "function" then
+		ensureConfigDir()
+		local ok, files = pcall(listfiles, CONFIG_DIR)
+		if ok and type(files) == "table" then
+			for _, path in ipairs(files) do
+				local n = tostring(path):match("([^/\\]+)%.json$")
+				if n then table.insert(names, n) end
+			end
+		end
+	else
+		for n in pairs(memoryConfigs) do table.insert(names, n) end
+	end
+	table.sort(names)
+	return names
+end
+
+function Library:SaveConfig(name)
+	name = cleanName(name)
+	if name == "" then return false, "enter a config name first" end
+
+	local data = {}
+	for flag, opt in pairs(self.Options) do
+		if flag:sub(1, 2) ~= "__" then
+			local entry = { v = encodeValue(opt.Value) }
+			if opt.Type == "Toggle" then entry.k = opt.Keybind and opt.Keybind.Name or false end
+			data[flag] = entry
+		end
+	end
+
+	local ok, json = pcall(HttpService.JSONEncode, HttpService, data)
+	if not ok then return false, "couldn't encode config" end
+
+	if hasFiles() then
+		ensureConfigDir()
+		local wrote, err = pcall(writefile, CONFIG_DIR .. "/" .. name .. ".json", json)
+		if not wrote then return false, tostring(err) end
+	else
+		memoryConfigs[name] = json
+	end
+	return true
+end
+
+function Library:LoadConfig(name)
+	name = cleanName(name)
+	if name == "" then return false, "pick a config first" end
+
+	local json
+	if hasFiles() then
+		local path = CONFIG_DIR .. "/" .. name .. ".json"
+		local checked, exists = pcall(isfile, path)
+		if not (checked and exists) then return false, "config not found" end
+		local ok, res = pcall(readfile, path)
+		if not ok then return false, tostring(res) end
+		json = res
+	else
+		json = memoryConfigs[name]
+		if not json then return false, "config not found" end
+	end
+
+	local ok, data = pcall(HttpService.JSONDecode, HttpService, json)
+	if not ok or type(data) ~= "table" then return false, "config file is corrupted" end
+
+	for flag, entry in pairs(data) do
+		local opt = self.Options[flag]
+		if opt and type(entry) == "table" then
+			pcall(function()
+				local v = decodeValue(entry.v)
+				if opt.Type == "Toggle" then
+					if entry.k ~= nil then
+						opt:SetKeybind(entry.k and Enum.KeyCode[entry.k] or nil)
+					end
+					opt:Set(v == true)
+				else
+					opt:Set(v)
+				end
+			end)
+		end
+	end
+	return true
+end
+
+function Library:DeleteConfig(name)
+	name = cleanName(name)
+	if name == "" then return false, "pick a config first" end
+	if hasFiles() then
+		if type(delfile) ~= "function" then return false, "deleting isn't supported here" end
+		local ok, err = pcall(delfile, CONFIG_DIR .. "/" .. name .. ".json")
+		if not ok then return false, tostring(err) end
+	else
+		memoryConfigs[name] = nil
+	end
+	return true
+end
+
+------------------------------------------------------------------------
+-- built-in settings tab (always created by CreateWindow, no option to disable it)
+------------------------------------------------------------------------
+buildSettingsTab = function(win)
+	local tab = win:Tab({ Icon = "sliders-horizontal", Bottom = true, _builtin = true })
+	tab.Button.LayoutOrder = 9999 -- always the last icon in the sidebar
+
+	local menuPage = tab:SubTab("menu")
+	local configPage = tab:SubTab("configs")
+
+	-- appearance
+	local look = menuPage:Section({ Name = "appearance", Side = "Left" })
+	look:ColorPicker({
+		Name = "accent color", Default = Library.Accent, Flag = "menu_accent",
+		Callback = function(c) Library:SetAccent(c) end,
+	})
+	look:ColorPicker({
+		Name = "outline color", Default = Theme.Outline, Flag = "menu_outline",
+		Callback = function(c) Library:SetOutline(c) end,
+	})
+	look:Divider()
+	look:Slider({
+		Name = "bg transparency", Min = 0, Max = 100, Default = math.floor(Theme.WindowT * 100 + 0.5),
+		Suffix = "%", Flag = "menu_bg_transparency",
+		Callback = function(v) Library:SetBackgroundTransparency(v / 100) end,
+	})
+
+	-- menu bind
+	local controls = menuPage:Section({ Name = "menu", Side = "Right" })
+	controls:Keybind({
+		Name = "menu bind", Default = win.MenuKey, Flag = "menu_key", AllowNone = false,
+		Changed = function(key) if key then win:SetMenuKey(key) end end,
+	})
+
+	-- configs
+	local configs = configPage:Section({ Name = "configs", Side = "Left" })
+	local nameBox = configs:TextBox({ Name = "config name", Placeholder = "new config name...", MaxLength = 32, Flag = "__config_name" })
+	local configList = configs:Dropdown({ Name = "saved configs", Options = Library:ListConfigs(), Flag = "__config_selected" })
+
+	local function refresh(select)
+		local names = Library:ListConfigs()
+		configList:Refresh(names)
+		if select and table.find(names, select) then configList:Set(select, true) end
+	end
+
+	-- uses the typed name if there is one, otherwise the selected config
+	local function target()
+		local typed = cleanName(nameBox:Get())
+		if typed ~= "" then return typed end
+		return configList.Value
+	end
+
+	configs:Divider()
+	configs:Button({ Name = "save", Callback = function()
+		local name = target()
+		local ok, err = Library:SaveConfig(name)
+		if ok then
+			refresh(cleanName(name))
+			nameBox:Set("", true)
+			Library:Notify("saved config '" .. cleanName(name) .. "'")
+		else
+			Library:Notify("save failed: " .. tostring(err))
+		end
+	end })
+	configs:Button({ Name = "load", Callback = function()
+		local name = configList.Value
+		local ok, err = Library:LoadConfig(name)
+		Library:Notify(ok and ("loaded config '" .. tostring(name) .. "'") or ("load failed: " .. tostring(err)))
+	end })
+	configs:Button({ Name = "delete", Callback = function()
+		local name = configList.Value
+		local ok, err = Library:DeleteConfig(name)
+		if ok then refresh() end
+		Library:Notify(ok and ("deleted config '" .. tostring(name) .. "'") or ("delete failed: " .. tostring(err)))
+	end })
+	configs:Button({ Name = "refresh list", Callback = function() refresh(configList.Value) end })
+
+	local info = configPage:Section({ Name = "info", Side = "Right" })
+	if hasFiles() then
+		info:Label("configs are saved to")
+		info:Label(CONFIG_DIR)
+	else
+		info:Label("no file access here:")
+		info:Label("configs last this session only")
+	end
 end
 
 ------------------------------------------------------------------------
