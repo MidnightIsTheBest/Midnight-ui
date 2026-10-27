@@ -388,8 +388,52 @@ end)
 local Container = {}
 Container.__index = Container
 
-function Container.new(window, items, inset)
-	return setmetatable({ Window = window, Items = items, Inset = inset or 17, _order = 0 }, Container)
+-- owner: the toggle whose "···" panel this is (nil for a section)
+-- section: section name, used to make config keys unique when two modules share a name
+function Container.new(window, items, inset, owner, section)
+	return setmetatable({
+		Window = window, Items = items, Inset = inset or 17, _order = 0,
+		Owner = owner, Section = section or (owner and owner.SaveKey) or "",
+	}, Container)
+end
+
+------------------------------------------------------------------------
+-- config registry
+-- Every named element is saved, no Flag needed:
+--   section elements become modules   -> one line each: [name]: value
+--   elements in a toggle's "···" panel -> settings on that toggle's line
+------------------------------------------------------------------------
+Library.Modules = {}       -- ordered list of top-level elements
+Library._moduleKeys = {}   -- key -> element
+
+local function uniqueKey(used, key)
+	if not used[key] then return key end
+	local n = 2
+	while used[key .. " #" .. n] do n += 1 end
+	return key .. " #" .. n
+end
+
+local function register(container, element, cfg)
+	if cfg and cfg._noSave then return end
+	local name = tostring(element.Name or "element"):gsub("[%[%]]", "")
+	local owner = container.Owner
+	if owner then
+		owner.Children = owner.Children or {}
+		owner._childKeys = owner._childKeys or {}
+		local key = uniqueKey(owner._childKeys, name)
+		owner._childKeys[key] = element
+		element.SaveKey = key
+		table.insert(owner.Children, element)
+	else
+		local key = name
+		if Library._moduleKeys[key] and container.Section ~= "" then
+			key = container.Section .. "/" .. name
+		end
+		key = uniqueKey(Library._moduleKeys, key)
+		Library._moduleKeys[key] = element
+		element.SaveKey = key
+		table.insert(Library.Modules, element)
+	end
 end
 
 function Container:_row(height)
@@ -400,12 +444,12 @@ function Container:_row(height)
 	})
 end
 
-function Container:_panel(width)
+function Container:_panel(width, owner)
 	local frame = popupFrame(self.Window.Overlay, width)
 	local items = create("Frame", {
 		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Parent = frame,
 	}, { list(14), pad(14, 14) })
-	return Container.new(self.Window, items, 14), frame
+	return Container.new(self.Window, items, 14, owner), frame
 end
 
 -- Toggle -------------------------------------------------------------
@@ -467,7 +511,7 @@ function Container:Toggle(cfg)
 		local dIcon = centered(icon("ellipsis", 20, Theme.TextDim, dots))
 		dots.MouseEnter:Connect(function() iconColor(dIcon, Theme.Text, 0.15) end)
 		dots.MouseLeave:Connect(function() iconColor(dIcon, Theme.TextDim, 0.15) end)
-		local panel, frame = container:_panel(width or 280)
+		local panel, frame = container:_panel(width or 280, self)
 		dots.MouseButton1Click:Connect(function()
 			Library:_togglePopup(container.Window, frame, dots, "right")
 		end)
@@ -487,6 +531,7 @@ function Container:Toggle(cfg)
 	table.insert(Library._bindToggles, toggle)
 	toggle.Type = "Toggle"
 	if toggle.Flag then Library.Options[toggle.Flag] = toggle end
+	register(self, toggle, cfg)
 	toggle:Set(cfg.Default or false, true)
 	render(true)
 	if cfg.Default and cfg.CallOnLoad ~= false then task.spawn(toggle.Callback, true) end
@@ -597,6 +642,8 @@ function Container:TextBox(cfg)
 	if tb.Flag then Library.Flags[tb.Flag] = cfg.Numeric and tonumber(tb.Value) or tb.Value end
 	tb.Type = "TextBox"
 	if tb.Flag then Library.Options[tb.Flag] = tb end
+	tb.Name = cfg.Name or "textbox"
+	register(self, tb, cfg)
 	return tb
 end
 
@@ -657,6 +704,8 @@ function Container:Keybind(cfg)
 	if kb.Flag then Library.Flags[kb.Flag] = kb.Value end
 	kb.Type = "Keybind"
 	if kb.Flag then Library.Options[kb.Flag] = kb end
+	kb.Name = cfg.Name or "keybind"
+	register(self, kb, cfg)
 	return kb
 end
 
@@ -716,6 +765,8 @@ function Container:Slider(cfg)
 	slider:Set(slider.Value, true)
 	slider.Type = "Slider"
 	if slider.Flag then Library.Options[slider.Flag] = slider end
+	slider.Name = cfg.Name or "slider"
+	register(self, slider, cfg)
 	return slider
 end
 
@@ -817,6 +868,9 @@ function Container:Dropdown(cfg)
 	if dd.Flag then Library.Flags[dd.Flag] = dd.Value end
 	dd.Type = "Dropdown"
 	if dd.Flag then Library.Options[dd.Flag] = dd end
+	dd.Name = cfg.Name or "dropdown"
+	dd.Multi = multi
+	register(self, dd, cfg)
 	return dd
 end
 
@@ -931,6 +985,8 @@ function Container:ColorPicker(cfg)
 	render(true)
 	cp.Type = "ColorPicker"
 	if cp.Flag then Library.Options[cp.Flag] = cp end
+	cp.Name = cfg.Name or "color"
+	register(self, cp, cfg)
 	return cp
 end
 
@@ -972,6 +1028,7 @@ function Library:CreateWindow(cfg)
 	gui.Parent = getGuiParent()
 	win.Gui = gui
 	Library._gui = gui
+	Library._windowName = win.Name
 
 	-- frosted backdrop: blurs the 3D world behind the glass while the menu is open
 	if win.BlurSize > 0 then
@@ -1114,11 +1171,28 @@ function Tab:SubTab(name)
 	sub.Page = create("ScrollingFrame", {
 		Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0,
 		CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollingDirection = Enum.ScrollingDirection.Y,
+		VerticalScrollBarInset = Enum.ScrollBarInset.ScrollBar, -- scrollbar never overlaps the right column
 		ScrollBarThickness = 3, ScrollBarImageColor3 = WHITE, ScrollBarImageTransparency = 0.8,
 		Visible = false, Parent = tab.Pages,
-	}, { pad(15, 15, 18, 18) })
-	sub.Left = create("Frame", { Size = UDim2.new(0.5, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Parent = sub.Page }, { list(12) })
-	sub.Right = create("Frame", { Position = UDim2.new(0.5, 6, 0, 0), Size = UDim2.new(0.5, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Parent = sub.Page }, { list(12) })
+	})
+
+	-- two columns laid out side by side by a horizontal list, so they can never overlap.
+	-- The gap is the list padding; each column is exactly half of what's left.
+	local GAP = 14
+	local columns = create("Frame", {
+		Name = "Columns", Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1, Parent = sub.Page,
+	}, { pad(15, 15, 18, 18), list(GAP, Enum.FillDirection.Horizontal) })
+	local function column(order)
+		return create("Frame", {
+			Name = order == 1 and "Left" or "Right", LayoutOrder = order,
+			Size = UDim2.new(0.5, -GAP / 2, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1, ClipsDescendants = false, Parent = columns,
+		}, { list(12) })
+	end
+	sub.Left = column(1)
+	sub.Right = column(2)
 
 	sub.Button.MouseEnter:Connect(function() if tab.Selected ~= sub then tween(sub.Button, 0.15, { TextColor3 = Theme.TextHover }) end end)
 	sub.Button.MouseLeave:Connect(function() if tab.Selected ~= sub then tween(sub.Button, 0.15, { TextColor3 = Theme.TextDim }) end end)
@@ -1172,7 +1246,7 @@ function SubTab:Section(cfg)
 	}, { list(14), pad(2, 14) })
 	create("Frame", { Size = UDim2.fromOffset(0, 51), BackgroundTransparency = 1, LayoutOrder = -1, Parent = items })
 
-	return Container.new(self.Window, items, 17)
+	return Container.new(self.Window, items, 17, nil, cfg.Name or "section")
 end
 
 ------------------------------------------------------------------------
@@ -1321,16 +1395,27 @@ end
 
 ------------------------------------------------------------------------
 -- configs
--- Saved as JSON files in "pawclient/configs" when the client environment has file
--- functions (writefile/readfile/listfiles). Otherwise they are kept in memory for
--- this session only. Flags starting with "__" are never saved.
+-- Saved as  pawclient/configs/<name>.json  when the client environment has file
+-- functions (writefile/readfile), otherwise kept in memory for this session only.
+--
+-- File format, one line per module:
+--   -- pawclient.hvh
+--   [fake ping]: True, amount: 80
+--   [auto buy]: False, primary: "ak-47"
+--   [bullet tracers]: True, tracer color: #F9CDEA
+--   [auto strafe]: True, bind: x
+--   [walk speed]: 16
+--
+-- Values:  True/False · numbers · #RRGGBB colours · key names (none = unbound)
+--          "text" in quotes · ["a", "b"] for multi dropdowns
 ------------------------------------------------------------------------
 local CONFIG_ROOT = "pawclient"
 local CONFIG_DIR = CONFIG_ROOT .. "/configs"
 local memoryConfigs = {}
+local knownFiles = {} -- names saved this session, for clients without listfiles
 
 local function hasFiles()
-	return type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
+	return type(writefile) == "function" and type(readfile) == "function"
 end
 
 local function ensureConfigDir()
@@ -1348,45 +1433,178 @@ local function cleanName(name)
 	return (name:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
-local function encodeValue(v)
-	if v == nil then return { __t = "None" } end
-	local t = typeof(v)
-	if t == "Color3" then return { __t = "Color3", v = toHex(v) } end
-	if t == "EnumItem" then return { __t = "Enum", e = tostring(v.EnumType), v = v.Name } end
-	if t == "table" then
-		local copy = {}
-		for i, x in ipairs(v) do copy[i] = x end
-		return copy
-	end
-	return v
+local function configPath(name)
+	return CONFIG_DIR .. "/" .. name .. ".json"
 end
 
-local function decodeValue(v)
-	if type(v) ~= "table" then return v end
-	if v.__t == "None" then return nil end
-	if v.__t == "Color3" then return fromHex(v.v) end
-	if v.__t == "Enum" then
-		local ok, item = pcall(function() return Enum[v.e][v.v] end)
-		return ok and item or nil
-	end
-	return v
+-- writing ---------------------------------------------------------------
+local function quote(str)
+	str = tostring(str):gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", " ")
+	return '"' .. str .. '"'
 end
 
-Library.HasFileAccess = hasFiles
+local function formatNumber(n)
+	if n == math.floor(n) then return tostring(math.floor(n)) end
+	return (string.format("%.4f", n):gsub("0+$", ""):gsub("%.$", ""))
+end
 
-function Library:ListConfigs()
-	local names = {}
-	if hasFiles() and type(listfiles) == "function" then
-		ensureConfigDir()
-		local ok, files = pcall(listfiles, CONFIG_DIR)
-		if ok and type(files) == "table" then
-			for _, path in ipairs(files) do
-				local n = tostring(path):match("([^/\\]+)%.json$")
-				if n then table.insert(names, n) end
+local function formatValue(el)
+	local v, t = el.Value, el.Type
+	if t == "Toggle" then return v and "True" or "False" end
+	if t == "Slider" then return formatNumber(v or 0) end
+	if t == "TextBox" then return quote(v or "") end
+	if t == "ColorPicker" then return toHex(v or WHITE) end
+	if t == "Keybind" then return keyName(v) end
+	if t == "Dropdown" then
+		if el.Multi then
+			local parts = {}
+			for _, item in ipairs(v or {}) do table.insert(parts, quote(item)) end
+			return "[" .. table.concat(parts, ", ") .. "]"
+		end
+		return v == nil and "none" or quote(v)
+	end
+	return "none"
+end
+
+local function serialize(header)
+	local lines = { "-- " .. header }
+	for _, el in ipairs(Library.Modules) do
+		local parts = { formatValue(el) }
+		if el.Type == "Toggle" then
+			if el.Keybind ~= nil then table.insert(parts, "bind: " .. keyName(el.Keybind)) end
+			for _, child in ipairs(el.Children or {}) do
+				table.insert(parts, child.SaveKey .. ": " .. formatValue(child))
 			end
 		end
+		table.insert(lines, "[" .. el.SaveKey .. "]: " .. table.concat(parts, ", "))
+	end
+	return table.concat(lines, "\n") .. "\n"
+end
+
+-- reading ---------------------------------------------------------------
+local function trim(str) return (str:gsub("^%s+", ""):gsub("%s+$", "")) end
+
+-- split on commas that are not inside "quotes" or [brackets]
+local function splitTop(str)
+	local parts, buf, inQuote, escaped, depth = {}, {}, false, false, 0
+	for i = 1, #str do
+		local c = str:sub(i, i)
+		if inQuote then
+			table.insert(buf, c)
+			if escaped then escaped = false
+			elseif c == "\\" then escaped = true
+			elseif c == '"' then inQuote = false end
+		elseif c == '"' then
+			inQuote = true
+			table.insert(buf, c)
+		elseif c == "," and depth == 0 then
+			table.insert(parts, trim(table.concat(buf)))
+			buf = {}
+		else
+			if c == "[" then depth += 1 elseif c == "]" then depth -= 1 end
+			table.insert(buf, c)
+		end
+	end
+	local last = trim(table.concat(buf))
+	if last ~= "" then table.insert(parts, last) end
+	return parts
+end
+
+local function unquote(str)
+	str = trim(str)
+	if str:sub(1, 1) == '"' and str:sub(-1) == '"' and #str >= 2 then
+		return (str:sub(2, -2):gsub("\\(.)", "%1"))
+	end
+	return str
+end
+
+local keyLookup
+local function parseKey(str)
+	str = trim(str):lower():gsub("%s", "")
+	if str == "none" or str == "" then return nil end
+	if not keyLookup then
+		keyLookup = {}
+		for _, item in ipairs(Enum.KeyCode:GetEnumItems()) do keyLookup[item.Name:lower()] = item end
+	end
+	return keyLookup[str]
+end
+
+local function parseValue(el, raw)
+	local t = el.Type
+	raw = trim(raw)
+	if t == "Toggle" then return raw:lower() == "true" end
+	if t == "Slider" then return tonumber(raw) end
+	if t == "TextBox" then return unquote(raw) end
+	if t == "ColorPicker" then return fromHex(raw) end
+	if t == "Keybind" then return parseKey(raw) end
+	if t == "Dropdown" then
+		if el.Multi then
+			local inner = raw:match("^%[(.*)%]$") or raw
+			local out = {}
+			for _, item in ipairs(splitTop(inner)) do table.insert(out, unquote(item)) end
+			return out
+		end
+		if raw:lower() == "none" then return nil end
+		return unquote(raw)
+	end
+	return nil
+end
+
+local function apply(el, raw)
+	local v = parseValue(el, raw)
+	if v == nil and (el.Type == "Slider" or el.Type == "ColorPicker") then return end
+	pcall(el.Set, el, v)
+end
+
+local function deserialize(text)
+	local applied = 0
+	for rawLine in (text .. "\n"):gmatch("(.-)\r?\n") do
+		local line = trim(rawLine)
+		if line ~= "" and line:sub(1, 2) ~= "--" then
+			local key, rest = line:match("^%[(.-)%]:%s*(.*)$")
+			local el = key and Library._moduleKeys[key]
+			if el then
+				local parts = splitTop(rest)
+				if parts[1] then apply(el, parts[1]) end
+				for i = 2, #parts do
+					local name, value = parts[i]:match('^([^:"]-):%s*(.*)$')
+					if name then
+						name = trim(name)
+						if el.Type == "Toggle" and name == "bind" then
+							pcall(el.SetKeybind, el, parseKey(value))
+						elseif el._childKeys and el._childKeys[name] then
+							apply(el._childKeys[name], value)
+						end
+					end
+				end
+				applied += 1
+			end
+		end
+	end
+	return applied
+end
+
+-- public API --------------------------------------------------------------
+Library.HasFileAccess = hasFiles
+Library.SerializeConfig = function() return serialize(Library._windowName or "pawclient.hvh") end
+Library.ApplyConfig = function(_, text) return deserialize(text) end
+
+function Library:ListConfigs()
+	local names, seen = {}, {}
+	local function add(n)
+		if n and not seen[n] then seen[n] = true table.insert(names, n) end
+	end
+	if hasFiles() then
+		if type(listfiles) == "function" then
+			ensureConfigDir()
+			local ok, files = pcall(listfiles, CONFIG_DIR)
+			if ok and type(files) == "table" then
+				for _, path in ipairs(files) do add(tostring(path):match("([^/\\]+)%.json$")) end
+			end
+		end
+		for n in pairs(knownFiles) do add(n) end
 	else
-		for n in pairs(memoryConfigs) do table.insert(names, n) end
+		for n in pairs(memoryConfigs) do add(n) end
 	end
 	table.sort(names)
 	return names
@@ -1396,24 +1614,16 @@ function Library:SaveConfig(name)
 	name = cleanName(name)
 	if name == "" then return false, "enter a config name first" end
 
-	local data = {}
-	for flag, opt in pairs(self.Options) do
-		if flag:sub(1, 2) ~= "__" then
-			local entry = { v = encodeValue(opt.Value) }
-			if opt.Type == "Toggle" then entry.k = opt.Keybind and opt.Keybind.Name or false end
-			data[flag] = entry
-		end
-	end
-
-	local ok, json = pcall(HttpService.JSONEncode, HttpService, data)
-	if not ok then return false, "couldn't encode config" end
+	local ok, text = pcall(serialize, self._windowName or "pawclient.hvh")
+	if not ok then return false, "couldn't build config: " .. tostring(text) end
 
 	if hasFiles() then
 		ensureConfigDir()
-		local wrote, err = pcall(writefile, CONFIG_DIR .. "/" .. name .. ".json", json)
+		local wrote, err = pcall(writefile, configPath(name), text)
 		if not wrote then return false, tostring(err) end
+		knownFiles[name] = true
 	else
-		memoryConfigs[name] = json
+		memoryConfigs[name] = text
 	end
 	return true
 end
@@ -1422,38 +1632,19 @@ function Library:LoadConfig(name)
 	name = cleanName(name)
 	if name == "" then return false, "pick a config first" end
 
-	local json
+	local text
 	if hasFiles() then
-		local path = CONFIG_DIR .. "/" .. name .. ".json"
-		local checked, exists = pcall(isfile, path)
-		if not (checked and exists) then return false, "config not found" end
-		local ok, res = pcall(readfile, path)
-		if not ok then return false, tostring(res) end
-		json = res
+		local ok, res = pcall(readfile, configPath(name))
+		if not ok or type(res) ~= "string" then return false, "config not found" end
+		text = res
 	else
-		json = memoryConfigs[name]
-		if not json then return false, "config not found" end
+		text = memoryConfigs[name]
+		if not text then return false, "config not found" end
 	end
 
-	local ok, data = pcall(HttpService.JSONDecode, HttpService, json)
-	if not ok or type(data) ~= "table" then return false, "config file is corrupted" end
-
-	for flag, entry in pairs(data) do
-		local opt = self.Options[flag]
-		if opt and type(entry) == "table" then
-			pcall(function()
-				local v = decodeValue(entry.v)
-				if opt.Type == "Toggle" then
-					if entry.k ~= nil then
-						opt:SetKeybind(entry.k and Enum.KeyCode[entry.k] or nil)
-					end
-					opt:Set(v == true)
-				else
-					opt:Set(v)
-				end
-			end)
-		end
-	end
+	local ok, count = pcall(deserialize, text)
+	if not ok then return false, "couldn't read config: " .. tostring(count) end
+	if count == 0 then return false, "no matching modules in that config" end
 	return true
 end
 
@@ -1462,8 +1653,9 @@ function Library:DeleteConfig(name)
 	if name == "" then return false, "pick a config first" end
 	if hasFiles() then
 		if type(delfile) ~= "function" then return false, "deleting isn't supported here" end
-		local ok, err = pcall(delfile, CONFIG_DIR .. "/" .. name .. ".json")
+		local ok, err = pcall(delfile, configPath(name))
 		if not ok then return false, tostring(err) end
+		knownFiles[name] = nil
 	else
 		memoryConfigs[name] = nil
 	end
@@ -1506,8 +1698,8 @@ buildSettingsTab = function(win)
 
 	-- configs
 	local configs = configPage:Section({ Name = "configs", Side = "Left" })
-	local nameBox = configs:TextBox({ Name = "config name", Placeholder = "new config name...", MaxLength = 32, Flag = "__config_name" })
-	local configList = configs:Dropdown({ Name = "saved configs", Options = Library:ListConfigs(), Flag = "__config_selected" })
+	local nameBox = configs:TextBox({ Name = "config name", Placeholder = "new config name...", MaxLength = 32, Flag = "__config_name", _noSave = true })
+	local configList = configs:Dropdown({ Name = "saved configs", Options = Library:ListConfigs(), Flag = "__config_selected", _noSave = true })
 
 	local function refresh(select)
 		local names = Library:ListConfigs()
