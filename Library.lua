@@ -572,6 +572,11 @@ function Container:Button(cfg)
 		tween(btn, 0.4, { TextColor3 = Theme.Text })
 		if cfg.Callback then task.spawn(cfg.Callback) end
 	end)
+
+	return {
+		Instance = btn,
+		SetText = function(_, text) btn.Text = text end,
+	}
 end
 
 -- TextBox ------------------------------------------------------------
@@ -1696,6 +1701,27 @@ buildSettingsTab = function(win)
 		Changed = function(key) if key then win:SetMenuKey(key) end end,
 	})
 
+	-- unload: first click arms it, a second click within 3 seconds unloads
+	controls:Divider()
+	local armed = 0
+	local unloadButton
+	unloadButton = controls:Button({ Name = "unload", Callback = function()
+		armed += 1
+		if armed == 1 then
+			unloadButton:SetText("click again to unload")
+			local token = os.clock()
+			unloadButton._token = token
+			task.delay(3, function()
+				if unloadButton._token == token and armed == 1 then
+					armed = 0
+					unloadButton:SetText("unload")
+				end
+			end)
+			return
+		end
+		Library:Unload()
+	end })
+
 	-- configs
 	local configs = configPage:Section({ Name = "configs", Side = "Left" })
 	local nameBox = configs:TextBox({ Name = "config name", Placeholder = "new config name...", MaxLength = 32, Flag = "__config_name", _noSave = true })
@@ -1761,6 +1787,13 @@ function Library:DebugPointer()
 	))
 end
 
+-- register cleanup for your own features (remove ESP, restore walkspeed, etc.)
+-- these run when the menu is unloaded
+Library._unloadHooks = {}
+function Library:OnUnload(fn)
+	table.insert(self._unloadHooks, fn)
+end
+
 function Library:Destroy()
 	for _, c in ipairs(self._connections) do c:Disconnect() end
 	table.clear(self._connections)
@@ -1768,6 +1801,24 @@ function Library:Destroy()
 	if blur then blur:Destroy() end
 	local gui = getGuiParent():FindFirstChild("pawclient")
 	if gui then gui:Destroy() end
+end
+
+-- fully unloads: turns every toggle off (so their callbacks clean up),
+-- runs OnUnload hooks, then removes the UI, blur and all input connections
+function Library:Unload()
+	if self.Unloaded then return end
+	self.Unloaded = true
+	self:_closePopupsAbove(0)
+
+	for _, t in ipairs(self._bindToggles) do
+		if t.Value then pcall(t.Set, t, false) end
+	end
+	for _, fn in ipairs(self._unloadHooks) do
+		local ok, err = pcall(fn)
+		if not ok then warn("[pawclient] unload hook failed: " .. tostring(err)) end
+	end
+
+	self:Destroy()
 end
 
 return Library
